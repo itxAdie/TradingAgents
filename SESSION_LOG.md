@@ -149,3 +149,68 @@ the same expected optional-extra/live-key guards. ruff: **All checks passed**.
 **Next recommended step:** user-driven smoke test with real keys/network
 (`python cli/main.py research -a XAUUSD -t 1h` and `-a BTCUSD -t 4h --save`),
 then decide Phase 2 (backtesting replay) timing.
+
+## Entry 3 — 2026-08-24 — Phase 2: backtesting engine implemented (research-only)
+
+**Scope delivered (ARCHITECTURE.md §P2, as-built notes in §P2.8):**
+- `tradingagents/backtest/` package: `clock.py` (SimulationClock),
+  `historical/` (validation gate, JSON store with embedded metadata +
+  content-hash integrity, Yahoo history fetcher via existing yfinance stack,
+  ReplayMarketDataProvider), `execution.py` (next-bar-open fills, pending-fill
+  bar counters, stop-wins pessimism, end_of_data settlement), `portfolio.py`
+  (settled-cash accounting, risk gates, sizing), `ledger.py` (TradeRecord +
+  JSON/CSV export), `analytics.py` (N/A-with-reason policy), `baselines.py`
+  (buy&hold, SMA cross, momentum), `walkforward.py` (OOS windows +
+  aggregation), `research_cache.py` (content-addressed keys,
+  `PROMPT_VERSION="phase1-2026-08-23"`), `report.py` (BacktestReport,
+  run_id + config_hash provenance), `engine.py` (`run_backtest`,
+  `run_walk_forward`, `AIResearchStrategy`, `_CountingLLM`,
+  `BacktestRunOutput`).
+- CLI: `cli/backtest.py` registered in `cli/main.py` — dataset selection,
+  cost knobs (`--slippage-bps/--spread-bps/--commission-bps`), sizing,
+  warmup, AI off by default (`--ai` required to spend money), auto-fetch
+  option, `--save` report + per-strategy ledgers.
+- Engine change from the design: `ResearchEngine(now_fn=...)` plus
+  `disabled_components` — backtests structurally disable news/sentiment
+  (macro optional); disabled gatherers record explicit
+  `DataSourceRef(status="unavailable")`.
+
+**Key invariants proven by tests (not just asserted):**
+- Zero look-ahead: parametrized prefix-isolation test replays truncated
+  datasets at three cut points and asserts identical decisions.
+- Determinism: two full runs produce byte-identical equity curves + ledgers.
+- Fill math verified against raw bar prices including adverse slippage/spread
+  direction for both longs and shorts; stop wins when SL+TP share one bar.
+- Portfolio equity identity hand-computed (cash + unrealized, settled cash).
+- Analytics degrade to N/A-with-reason instead of fabricating numbers;
+  annualization moved to log-growth with an overflow guard.
+
+**Bugs caught by new tests during development (fixed in implementation code):**
+- `compute_stats` annualization overflowed on short equity curves →
+  log-space growth with N/A fallback reason.
+- `Portfolio.can_open(limits_max_open=...)` was called by execution but not
+  defined → added (position slots < max AND cash > 0).
+- `JsonDataStore.load` leaked pydantic ValidationError on corrupt payloads →
+  hardened to uniform `HistoricalDataError`.
+- Walk-forward aggregation initially mixed strategies in one aggregate →
+  now grouped per strategy id.
+
+**Tests executed:** `.venv/bin/pytest -q`, `.venv/bin/ruff check .`
+
+**Test results:** pytest **739 passed, 2 skipped, 69 subtests passed**
+(~3 min; Phase 1 state was 658 passed — 81 new tests, zero regressions).
+ruff: **All checks passed**.
+
+**Known limitations (Phase 2 scope, by design):**
+- Fixed strategy set only (three baselines + optional AI research pass);
+  no parameter optimization/search loops.
+- Single historical source (Yahoo) with its depth bounds (~60d intraday
+  15m, ~730d 1h); gaps flagged in metadata, never interpolated.
+- No margin financing/costs; settled-cash model only.
+- AI cache is local-JSON; token counts come from provider usage fields when
+  exposed; costs are always None unless pricing is configured (never
+  invented).
+
+**Next recommended step:** real-data smoke run of the CLI backtest
+(`python cli/main.py backtest -a XAUUSD -t 1h --fetch --save`), then decide
+Phase 3 (paper trading) timing.

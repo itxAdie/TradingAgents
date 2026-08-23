@@ -433,19 +433,187 @@ dashboard/SaaS. Interfaces kept clean so Phase 3 (paper trading) can consume
 
 ---
 
+# PHASE 2 — Backtesting Engine (IMPLEMENTED)
+
+Goal: historical research and strategy evaluation on top of Phase 1 —
+**one research/signal engine, multiple execution environments**. The
+backtester replays the *same* `ResearchEngine` over a deterministic
+historical timeline and evaluates the resulting `ResearchSignal` stream with
+a simulated executor. **Still research-only**: nothing here places orders or
+connects to a broker; "execution" means deterministic simulation only.
+Status: **implemented and tested** (`tradingagents/backtest/`, CLI command
+`backtest`, tests `tests/test_backtest_*.py`). Documented deviations from
+the original design are noted inline below.
+
+## P2.0 Core principle — no duplicated signal logic
+
+The backtester must not reimplement signal generation. It reuses:
+
+- `MarketDataProvider` protocol (new `ReplayMarketDataProvider`
+  implementation serves stored bars up to simulation time),
+- `OhlcvSeries`/`Bar`/`Quote` models unchanged,
+- asset registry + `Timeframe` enum unchanged,
+- `compute_indicators` / `TechnicalSnapshot` unchanged (pure functions of a
+  truncated series — recomputed per decision step on data available at T),
+- all seven research agents + `ResearchSignal` schemas unchanged,
+- `DEFAULT_CONFIG`, `log_event`, vendor error taxonomy unchanged.
+
+## P2.1 The one required engine change — injectable clock
+
+`ResearchEngine` currently calls `datetime.now(timezone.utc)` directly
+(freshness gate, timestamps, news windows). Phase 2 adds an optional
+constructor parameter `now_fn: Callable[[], datetime]` defaulting to real
+UTC now — zero behavior change for existing callers. The backtester injects
+a `SimulationClock` so "current time" is the simulated timestamp T. This is
+the single smallest change that makes the live research path and the
+backtest path literally the same code.
+
+## P2.2 New package layout (additive): `tradingagents/backtest/`
+
+```
+tradingagents/backtest/
+├── __init__.py
+├── clock.py            # SimulationClock: deterministic sequential UTC clock
+├── historical/
+│   ├── store.py        # HistoricalDataStore Protocol + JsonDataStore impl
+│   ├── yahoo_history.py# fetch+persist history via existing Yahoo adapter
+│   ├── replay_provider.py # MarketDataProvider over the store at time T
+│   └── validation.py   # deterministic dataset quality report (reject/flag)
+├── execution.py        # ExecutionSimulator (next-bar-open entry, SL/TP)
+├── portfolio.py        # cash/equity/exposure/drawdown accounting
+├── ledger.py           # TradeRecord schema + JSON/CSV export
+├── analytics.py        # performance stats (N/A when insufficient obs)
+├── baselines.py        # buy&hold, SMA crossover, momentum
+├── walkforward.py      # train/validation/test window generator + aggregation
+├── research_cache.py   # reuse of identical research runs (documented keys)
+├── report.py           # BacktestReport schema, run_id, provenance metadata
+└── cli.py              # register_backtest_command(app) → cli/main.py
+```
+
+Layer position: `backtest/` may import `marketdata/`, `assets/`,
+`analysis/`, `research/`, `dataflows/`; nothing in lower layers imports
+`backtest/`.
+
+## P2.3 Historical data
+
+- **Source**: Yahoo Finance via the *existing* yfinance stack
+  (`yf_retry`, same symbol mapping from the registry). Known constraint to
+  document: Yahoo intraday depth is bounded (~60 days for 15m, ~730 days for
+  1h); daily goes back decades. The store records exactly what was fetched.
+- **Storage**: one JSON dataset file per (asset, timeframe, source, range)
+  under `DEFAULT_CONFIG["data_cache_dir"]/historical/`, plus a metadata
+  sidecar recording source, symbol mapping, range, fetch timestamp, bar
+  count, timezone (UTC everywhere), and a content-hash dataset id used as
+  filename. Behind the `HistoricalDataStore` Protocol so Parquet/DuckDB can
+  be added later without touching engine/backtester.
+- **Validation** (`validation.py`): deterministic checks — ordering,
+  duplicates, missing expected candles (gap detection per timeframe calendar
+  approximation), OHLC relationships, non-finite/negative prices, tz-awareness.
+  Policy: invalid rows are **rejected with a typed error listing reasons**;
+  gaps are flagged in metadata, never silently interpolated.
+- **Provenance**: every backtest report embeds the dataset ids it consumed.
+
+## P2.4 Information-availability rules (anti look-ahead)
+
+1. A bar stamped T carries information available **at its close**; decision
+   timestamps are bar-close timestamps.
+2. At decision time T the replay provider returns only bars with
+   `timestamp <= T`; indicators are recomputed on that truncated series.
+3. Signals execute at the **next bar's open after the decision close**
+   (default; configurable delay in bars), never at the decision candle's own
+   close/open.
+4. News/sentiment are **disabled by default** in backtests (live-only
+   endpoints would fabricate recency). Reports state enabled components
+   explicitly. FRED macro uses `curr_date=T` (genuinely historical).
+5. Stop/target fills resolve intra-candle conservatively: if both SL and TP
+   fall inside one bar, the **stop wins** (pessimistic assumption).
+6. Walk-forward windows slice by the same timestamp semantics; test-window
+   data is invisible to training/research phases.
+
+## P2.5 Simulation, portfolio, analytics
+
+- Deterministic `ExecutionSimulator`: market entries/exits, SL/TP,
+  configurable `slippage_bps`, per-asset `spread_bps`, commission per side;
+  fixed-notional or pct-of-equity sizing (LLM never sizes positions);
+  risk limits (max position, max simultaneous positions, max exposure).
+- `portfolio.py` tracks cash, open positions, realized/unrealized PnL,
+  equity, exposure, drawdown per bar → structured equity curve rows.
+- `ledger.py`: one immutable record per trade (ids, timestamps, prices,
+  costs, gross/net PnL, return %, duration, exit reason, strategy version);
+  JSON + CSV export.
+- `analytics.py`: returns/trade stats/risk/risk-adjusted/profitability/
+  behavior metrics; anything statistically meaningless at low observation
+  counts returns `"N/A"` with the reason. Buy&Hold benchmark per asset.
+- `report.py`: BACKTEST REPORT (JSON-first, human rendering second) with
+  run_id (uuid + config hash), git commit, strategy/dataset/model versions,
+  full cost & assumption disclosure. Disclaimer: past simulation ≠ future
+  results.
+
+## P2.6 Walk-forward + AI usage tracking
+
+- `walkforward.py`: configurable train/validation/test windows + step +
+  minimum-bars guard; per-window independent results; aggregation
+  (mean/median/worst/best/% profitable) only after all windows complete;
+  basic overfitting diagnostics reported as *evidence* (train/test gap,
+  window instability, trade-count floor), never as claims of absence.
+- `research_cache.py`: key = hash(asset, T, timeframe, input-data hash,
+  model ids, prompt/config version) → cached `ResearchSignal` JSON.
+  Invalidation = any key-component change. Cache hits are recorded in the
+  report for reproducibility. LLM call counts (+token usage when the
+  provider exposes it; costs only when configured pricing exists — never
+  invented) tracked per run.
+
+## P2.7 Explicit non-goals (Phase 2)
+
+No broker connectivity, no optimization/search loops (only the fixed
+strategy set), no dashboard UI, no multi-process parallelism beyond safe
+per-window isolation, no fabricated historical news/sentiment.
+
+## P2.8 As-built notes (deviations from the original design)
+
+- CLI wiring lives in `cli/backtest.py` (mirrors `cli/research.py`), not a
+  package-internal `backtest/cli.py`; the orchestrator itself is
+  `tradingagents/backtest/engine.py` (`run_backtest`, `run_walk_forward`,
+  `AIResearchStrategy`, `_CountingLLM`, `BacktestRunOutput`).
+- `ResearchEngine` additionally accepts `disabled_components` (beyond
+  `now_fn`) so news/sentiment/macro can be switched off structurally —
+  disabled gatherers append an explicit `DataSourceRef(status="unavailable")`
+  instead of silently skipping.
+- Dataset metadata is embedded **inside** the dataset JSON payload (one
+  file, atomic write, content-hash integrity check on load) rather than a
+  separate sidecar file; corrupt/unreadable datasets raise
+  `HistoricalDataError` uniformly.
+- Walk-forward currently runs **out-of-sample-only** windows: decisions are
+  confined to each frame's test phase while earlier bars serve as indicator
+  context — equivalent to live operation for the parameter-free baselines.
+  When parameterized strategies arrive, fitting must happen inside
+  train/validation phases only (documented in `run_walk_forward`).
+- Portfolio accounting is settled-cash margin style: `cash` changes only on
+  position close; unrealized P&L marks separately. No financing costs or
+  margin calls (documented simplification; never affects signal logic).
+- Each strategy pass gets its own `SimulationClock`/provider instance
+  (the clock forbids rewinding, so passes cannot share one timeline).
+- Equity curves are anchored at configured capital before the first trade;
+  annualized return degrades to `N/A` with a reason when the window is too
+  short to annualize meaningfully (overflow guard).
+- Pending fills count *bars*, not wall time, so weekend/holiday gaps can
+  never cause phantom time-based executions.
+
+---
+
 ## Future Phase Boundaries (documentation only — do not implement)
 
-| Phase | Scope | Boundary hooks available after Phase 1 |
+| Phase | Scope | Boundary hooks available |
 |---|---|---|
-| 2 Backtesting | replay signals over history | `OhlcvSeries` historical fetch; `ResearchSignal` is serializable |
-| 3 Paper Trading | simulated fills of signals | `ResearchSignal` action/levels/invalidation fields |
-| 4 Dashboard | UI over stored runs | report tree + structured JSON artifacts |
+| 2 Backtesting | replay signals over history | **implemented** (`tradingagents/backtest/`, P2.x above) |
+| 3 Paper Trading | simulated fills of signals | `ResearchSignal` action/levels/invalidation fields; backtest executor patterns |
+| 4 Dashboard | UI over stored runs | report tree + structured JSON artifacts + equity curve rows |
 | 5 Broker Integration | real execution | out of scope; nothing in core may import brokers |
 | 6 SaaS/API | hosted service | engine is a pure-Python entry point |
 
 ---
 
-*Last verified against repository state: 2026-08-23 (v0.3.1 + Phase 1
-implementation; suite 658 passed / 2 skipped / 69 subtests, ruff clean).
-Update this file
+*Last verified against repository state: 2026-08-24 (v0.3.1 + Phase 1 +
+Phase 2 implementation; suite 739 passed / 2 skipped / 69 subtests, ruff
+clean). Update this file
 whenever implementation changes architecture.*

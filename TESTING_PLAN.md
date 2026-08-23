@@ -4,6 +4,9 @@ Testing strategy for the research platform. Baseline (2026-08-23, pre-Phase 1):
 **576 passed, 2 skipped, 69 subtests** in ~2 min; `ruff check .` clean.
 After Phase 1 implementation (2026-08-23): **658 passed, 2 skipped,
 69 subtests** (~3 min); `ruff check .` clean — 82 new tests, zero regressions.
+After Phase 2 implementation (2026-08-24): **739 passed, 2 skipped,
+69 subtests** (~3 min); `ruff check .` clean — 81 new backtest tests, zero
+regressions.
 
 ## Principles
 
@@ -45,6 +48,22 @@ Existing suites already cover: symbol normalization paths, vendor routing and
 error taxonomy, OHLCV cache freshness/staleness guards, date boundaries and
 look-ahead filtering, structured agent prompts, checkpoint resume, CLI config
 precedence, LLM provider knobs, news windows, i18n.
+
+## 1b. Phase 2 Unit Tests (backtesting engine)
+
+All offline (synthetic OHLC series + fake providers); 81 tests across eight
+files. Key invariants each file pins down:
+
+| File | Verifies | Tests |
+|---|---|---|
+| `tests/test_backtest_clock.py` | tz handling, UTC normalization, backward-set rejection, monotone setting, clock never self-advances | 6 |
+| `tests/test_backtest_historical.py` | validation gate hard-rejects bad rows (non-positive/high<max(open,close)/unordered/duplicate), gaps flagged not fixed; JSON store roundtrip, corruption detection via content hash, retention guard, relabeling to HISTORICAL | 15 |
+| `tests/test_backtest_replay_provider.py` | future-bar invisibility (`timestamp <= clock.now()`), visibility exactly at bar close, NoMarketDataError before first bar/wrong asset, wrong-timeframe and non-HISTORICAL rejection, slicing clamped to cutoff, call telemetry | 10 |
+| `tests/test_backtest_execution_portfolio.py` | HOLD never schedules; next-bar-open fills with adverse cost math; pending-fill replacement; flip = exit+entry at same open; stop-wins pessimism; TP fires; end_of_data honest settlement; exposure/cash gates; settled-cash portfolio accounting hand-computed; sizing modes; ledger CSV/JSON export | 14 |
+| `tests/test_backtest_analytics.py` | hand-computed return/drawdown/trade stats/profit factor; N/A-with-reason for no-losses/short windows/zero dispersion; B&H benchmark formula first-decision-open → last-close | 7 |
+| `tests/test_backtest_baselines_walkforward.py` | exact SMA cross indices on synthetic closes; momentum sign rule; B&H once-only; ATR level math; window frame arithmetic; aggregation median/best/worst/% profitable; empty-input consistency notes | 12 |
+| `tests/test_backtest_engine.py` | slice_upto boundary; output shape; **determinism** across repeated runs; **prefix isolation**: decisions identical when future bars are truncated away at multiple cut points (anti look-ahead proof); provenance timestamps; walk-forward e2e grouping; report schema/disclaimer/config-hash stability | 10 |
+| `tests/test_backtest_ai_strategy.py` | AIResearchStrategy binds sim-clock `now_fn`, disables news/sentiment(/macro), default LLM client construction, cache miss→hit→growing-history-miss, cross-instance persistence, corrupt-entry treated as miss, sha256 key form | 8 |
 
 ## 2. Integration Tests (new, still offline)
 
