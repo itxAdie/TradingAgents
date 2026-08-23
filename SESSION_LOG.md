@@ -1,0 +1,151 @@
+# SESSION_LOG.md
+
+Chronological engineering log. **Append-only** — never rewrite old entries.
+Each entry records: date, objective, files changed, architecture decisions,
+new dependencies, problems encountered, tests executed, results, known
+issues, and the next recommended step.
+
+---
+
+## Entry 1 — 2026-08-23 — Phase 0: repository audit, governance docs, baseline
+
+**Objective:** Inspect the existing TradingAgents repository (v0.3.1) without
+modifying behavior; establish project governance (six root documents); run
+and record the baseline test suite and lint; propose the Phase 1 research-
+platform architecture for approval.
+
+**Files changed (all new, documentation only):**
+- `PROJECT_RULES.md` — engineering rules (architecture, quality, config/secrets,
+  data integrity, AI usage, trading safety, compatibility, git safety)
+- `SESSION_LOG.md` — this log
+- `ARCHITECTURE.md` — CURRENT vs PHASE 1 TARGET architecture + future phase boundaries
+- `TESTING_PLAN.md` — unit/integration/mock/failure/regression strategy
+- `API_DOCUMENTATION.md` — external providers + stable internal interfaces (+ planned Phase 1 contracts)
+- `ACCESS_INFO.md` — env vars, credential matrix, local setup (no secrets)
+
+No production code was modified in this entry.
+
+**Architecture decisions (documented, not yet implemented):**
+- EXTEND the existing stack rather than rebuild:
+  - reuse `dataflows/symbol_utils.normalize_symbol()` alias tables for XAUUSD→GC=F / BTCUSD→BTC-USD instead of a parallel symbol system;
+  - reuse the vendor router (`route_to_vendor`) and error taxonomy as the foundation of the new `MarketDataProvider` abstraction;
+  - reuse stockstats-based indicator code (`stockstats_utils`, verified snapshot) inside a new deterministic `analysis/indicators.py`;
+  - reuse the structured-output pattern (`agents/schemas.py` +
+    `agents/utils/structured.py`) for all new research schemas;
+  - build the research graph with the same LangGraph node/factory patterns used by `graph/setup.py`.
+- Add new packages additively: `tradingagents/assets/`,
+  `tradingagents/marketdata/`, `tradingagents/analysis/`,
+  `tradingagents/research/`. Existing packages stay import-compatible.
+- Identified gaps driving the design: no timeframe concept anywhere (daily
+  bars only), date-only strings without timezone info, no explicit
+  real-time/delayed/cached data-status labels, final output is a parsed
+  markdown rating rather than a structured signal, per-agent failure still
+  aborts a run, confidence only exists inside SentimentReport.
+- Research-only constraint recorded in PROJECT_RULES §6 (no execution paths).
+
+**New dependencies:** none.
+
+**Problems encountered:**
+- No pre-existing virtualenv on this machine; system Python had no deps.
+  Created `.venv` and installed `-e ".[dev]"`; initial installs were killed
+  by tooling timeouts mid-download (heavy langchain/langgraph/pandas tree),
+  completed manually by the user. Wheels cached afterwards.
+- Two subagent exploration tasks returned empty results; resolved by direct
+  file reads instead.
+
+**Tests executed (baseline):**
+- `.venv/bin/pytest -q`
+- `.venv/bin/ruff check .`
+
+**Test results:**
+- pytest: **576 passed, 2 skipped, 69 subtests passed**, ~2 min 09 s.
+  Skips are expected: `langchain_aws` optional extra absent (bedrock test)
+  and live DeepSeek API key guard.
+- ruff: **All checks passed** (strict select; E501 exempt per pyproject).
+- Baseline recorded here and in TESTING_PLAN.md header.
+
+**Known issues (pre-existing, unchanged):**
+- Pipeline is daily-bar oriented end to end; intraday timeframes require new
+  plumbing (state keys, cache TTL semantics, news windows).
+- yfinance gold mapping uses GC=F futures (session hours differ from spot;
+  quotes delayed). Must be labelled DELAYED, never real-time spot.
+- An unexpected exception inside one agent node fails the whole graph run
+  (no per-node failure capture yet) — addressed in Phase 1 design.
+- `test.py` at repo root is an ad-hoc timing script, not part of the suite.
+
+**Next recommended step:** Await user approval of the proposed Phase 1
+architecture (ARCHITECTURE.md "PHASE 1 TARGET"). On approval, implement in
+order: asset registry + timeframes → normalized models + provider protocol +
+Yahoo adapter → indicator engine → research schemas → research graph/engine →
+confidence heuristic → CLI `research` command → full test pass per
+TESTING_PLAN.md.
+
+---
+
+## Entry 2 — 2026-08-23 — Phase 1: research platform implemented (research-only)
+
+**Scope executed (approved Phase 1 architecture):**
+- New packages (all additive, no existing behavior changed):
+  - `tradingagents/assets/` — frozen `AssetSpec` registry; canonical IDs
+    `XAUUSD`→Yahoo `GC=F`, `BTCUSD`→Yahoo `BTC-USD`; single lookup point
+    (`get_asset`), clear `UnknownAssetError`.
+  - `tradingagents/marketdata/` — `Timeframe` enum (15m/1h/4h/1d; H4 flagged
+    for resampling; staleness windows per timeframe); frozen `Bar`,
+    validated `OhlcvSeries` (tz-aware UTC required, strictly ascending,
+    uniform volume presence); `Quote`; `DataStatus` +
+    `classify_status` (>48 h → HISTORICAL; crypto fresh → REALTIME;
+    Yahoo venue fresh → DELAYED, never REALTIME for gold);
+    runtime-checkable `MarketDataProvider` protocol; `YahooMarketDataProvider`
+    wrapping existing `yf_retry` + `yfinance` with look-ahead filtering and
+    H4 resampling from 60 m bars.
+  - `tradingagents/analysis/` — deterministic indicator engine
+    (EMA10, SMA20/50/200, RSI14 Wilder, MACD 12/26/9, Bollinger 20±2σ,
+    ATR14 Wilder, 10-bar momentum %, realized volatility annualized with
+    crypto-vs-venue conventions) producing a structured `TechnicalSnapshot`
+    with explicit `missing_reasons` (never silent NaN); trend/momentum/
+    volatility classifiers; markdown renderer for prompts. Confidence
+    aggregation: documented experimental heuristic, weights
+    agreement 0.40 / completeness 0.25 / consistency 0.20 / model 0.15.
+  - `tradingagents/research/` — pydantic schemas for the full report tree
+    (`ResearchReport`, section models reusing `SentimentBand`,
+    `ResearchManagerVerdict`, `AgentFailure`) and `ResearchSignal` carrying
+    the mandatory literal disclaimer "RESEARCH SIGNAL — NOT EXECUTED";
+    JSON-lines event logging with secret filtering; deterministic signal
+    assembly (entry = verified latest close, stop = ±1.5×ATR, target = 2×risk;
+    HOLD emits no protective levels; stale/missing market data ⇒ no signal);
+    sequential `ResearchEngine` (7 LLM nodes, per-agent try/except isolation
+    via `AgentFailure`, structured-output-only calls — no free-text fallback,
+    deterministic fallback action when the verdict is missing).
+  - `cli/research.py` — non-interactive `research` subcommand
+    (`--asset/-a` required, `--timeframe/-t` default 1h, `--save` writes
+    report/signal JSON artifacts), registered into `cli/main.py`.
+
+**Deliberate deviations from the proposal (documented in ARCHITECTURE.md):**
+1. Indicators computed with explicit pandas expressions instead of stockstats:
+   stockstats' `close_N_sma` naming cannot express our non-default windows
+   cleanly (ema_10, sma_50/200, boll 20±2σ). Every window is now visible code.
+2. Root CLI callback `_root_fallback` restores legacy bare-invocation behavior
+   (runs interactive flow): adding a second typer subcommand had silently
+   switched the app to multi-command mode, breaking two existing tests.
+
+**Bugs caught by new tests during development (fixed in implementation code):**
+- `OhlcvSeries` volume-uniformity validator rejected all-volumeless series
+  (`if has_volume and not all(...)` vs correct `any(...)`).
+- `confidence.side()` mapped only substring vocabularies, so plain
+  `"up"`/`"buy"` votes counted as neutral; exact-set matching restored first.
+
+**Tests executed:** `.venv/bin/pytest -q`, `.venv/bin/ruff check .`
+
+**Test results:** pytest **658 passed, 2 skipped, 69 subtests passed**
+(~3 min; baseline was 576 passed — 82 new tests, zero regressions). Skips are
+the same expected optional-extra/live-key guards. ruff: **All checks passed**.
+
+**Known limitations (Phase 1 scope, unchanged by design):**
+- Research signals are informational heuristics; confidence is labelled
+  experimental and must not be read as probability.
+- Single provider (Yahoo) implemented; protocol ready for more vendors later.
+- No persistence layer yet: artifacts only when `--save` is passed.
+
+**Next recommended step:** user-driven smoke test with real keys/network
+(`python cli/main.py research -a XAUUSD -t 1h` and `-a BTCUSD -t 4h --save`),
+then decide Phase 2 (backtesting replay) timing.
