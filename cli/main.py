@@ -71,6 +71,18 @@ app = typer.Typer(
     add_completion=True,  # Enable shell completion
 )
 
+from cli.research import register_research_command  # noqa: E402  (needs `app` first)
+
+register_research_command(app)
+
+
+@app.callback(invoke_without_command=True)
+def _root_fallback(ctx: typer.Context):
+    """Preserve pre-research behavior: bare invocation runs the analysis flow."""
+    if ctx.invoked_subcommand is None:
+        analyze(checkpoint=None)
+        raise typer.Exit()
+
 
 # Create a deque to store recent messages with a maximum length
 class MessageBuffer:
