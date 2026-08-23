@@ -19,6 +19,7 @@ signal assembly. Design notes:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 
@@ -55,6 +56,11 @@ from tradingagents.research.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    """Default clock: real wall-clock UTC (injected otherwise)."""
+    return datetime.now(timezone.utc)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -264,17 +270,30 @@ def _debate_prompt(state: dict[str, Any], side: str) -> str:
 
 
 class ResearchEngine:
-    """Research-only entry point: ``(report, signal|None)`` per run."""
+    """Research-only entry point: ``(report, signal|None)`` per run.
+
+    ``now_fn`` injects the source of "current time". Production callers omit
+    it (real UTC clock); the backtester injects a simulation clock so the
+    exact same code path runs against historical data without look-ahead
+    (ARCHITECTURE.md P2.1). ``disabled_components`` names optional enrichment
+    gatherers to skip entirely (e.g. ``("news", "sentiment")`` in backtests,
+    where live-only endpoints cannot provide point-in-time content); disabled
+    components are reported as explicitly unavailable, never fabricated.
+    """
 
     def __init__(
         self,
         config: dict[str, Any] | None = None,
         provider: MarketDataProvider | None = None,
         llm: Any = None,
+        now_fn: Callable[[], datetime] | None = None,
+        disabled_components: Collection[str] = (),
     ):
         self.config = config or DEFAULT_CONFIG.copy()
         self.provider = provider or YahooMarketDataProvider()
         self.llm = llm  # None -> created lazily in run() so tests can inject
+        self._now_fn: Callable[[], datetime] = now_fn or _utc_now
+        self.disabled_components = frozenset(disabled_components)
         self.nodes = {
             "technical_analyst": create_technical_analyst_node,
             "macro_analyst": create_macro_analyst_node,
@@ -287,8 +306,12 @@ class ResearchEngine:
 
     # -- public API ---------------------------------------------------------
 
+    def _now(self) -> datetime:
+        """Current time — wall clock, or the simulation clock when injected."""
+        return self._now_fn()
+
     def run(self, asset_id: str, timeframe: Timeframe | str) -> AssembledResult:
-        started = datetime.now(timezone.utc)
+        started = self._now()
         tf = timeframe if isinstance(timeframe, Timeframe) else Timeframe(str(timeframe).lower())
         asset = get_asset(asset_id)
         failures: list[AgentFailure] = []
@@ -329,7 +352,7 @@ class ResearchEngine:
         ):
             self._execute_agent(name, state, llm)
 
-        generated_at = datetime.now(timezone.utc)
+        generated_at = self._now()
         models_used = [
             str(self.config.get("quick_think_llm")),
             str(self.config.get("deep_think_llm")),
@@ -372,14 +395,14 @@ class ResearchEngine:
                 )
                 log_event(
                     "research_completed", asset_id=asset.asset_id,
-                    duration_ms=int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
+                    duration_ms=int((self._now() - started).total_seconds() * 1000),
                     outcome="signal",
                 )
                 return AssembledResult(report, signal)
 
         log_event(
             "research_completed", asset_id=asset.asset_id, outcome="no_signal",
-            reason=reason, duration_ms=int((datetime.now(timezone.utc) - started).total_seconds() * 1000),
+            reason=reason, duration_ms=int((self._now() - started).total_seconds() * 1000),
         )
         return AssembledResult(report, None, reason)
 
@@ -403,7 +426,7 @@ class ResearchEngine:
             return None
         data_sources.append(DataSourceRef(
             name=self.provider.name, kind="market_data", status=series.status.value,
-            retrieved_at=datetime.now(timezone.utc),
+            retrieved_at=self._now(),
             detail=f"{len(series.bars)} bars, latest {series.latest_timestamp}",
         ))
         snapshot = compute_indicators(series)
@@ -421,13 +444,22 @@ class ResearchEngine:
         latest = series.latest_timestamp
         if latest is None:
             return DataFreshness.STALE
-        age_hours = (datetime.now(timezone.utc) - latest).total_seconds() / 3600
+        age_hours = (self._now() - latest).total_seconds() / 3600
         # Timeframe-specific windows live in one place (timeframes.py) and are
         # deliberately generous so weekends/holidays don't false-positive.
         return DataFreshness.FRESH if age_hours <= tf.staleness_hours() else DataFreshness.STALE
 
     def _gather_news(self, asset: AssetSpec, state: dict[str, Any]) -> None:
-        now = datetime.now(timezone.utc)
+        now = self._now()
+        if "news" in self.disabled_components:
+            state["news_text"] = ""
+            state.setdefault("data_sources").append(DataSourceRef(
+                name="yahoo_news", kind="news", status="unavailable",
+                retrieved_at=now,
+                detail="disabled by configuration (e.g. historical backtest: "
+                       "no point-in-time source available)",
+            ))
+            return
         start = (now - timedelta(days=NEWS_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
         end = now.strftime("%Y-%m-%d")
         blocks: list[str] = []
@@ -449,7 +481,17 @@ class ResearchEngine:
         ))
 
     def _gather_sentiment(self, asset: AssetSpec, state: dict[str, Any]) -> None:
-        now = datetime.now(timezone.utc)
+        now = self._now()
+        if "sentiment" in self.disabled_components:
+            state["sentiment_text"] = ""
+            state["sentiment_sources"] = []
+            state.setdefault("data_sources").append(DataSourceRef(
+                name="social", kind="sentiment", status="unavailable",
+                retrieved_at=now,
+                detail="disabled by configuration (e.g. historical backtest: "
+                       "no point-in-time source available)",
+            ))
+            return
         blocks: list[str] = []
         sources: list[str] = []
         try:
@@ -474,7 +516,15 @@ class ResearchEngine:
         ))
 
     def _gather_macro(self, asset: AssetSpec, state: dict[str, Any]) -> None:
-        now = datetime.now(timezone.utc)
+        now = self._now()
+        if "macro" in self.disabled_components:
+            state["macro_text"] = ""
+            state.setdefault("data_sources").append(DataSourceRef(
+                name="fred", kind="macro", status="unavailable",
+                retrieved_at=now,
+                detail="disabled by configuration",
+            ))
+            return
         today = now.strftime("%Y-%m-%d")
         blocks: list[str] = []
         series_names = _GOLD_MACRO_SERIES if asset.asset_class.value != "crypto" else ()
@@ -596,4 +646,4 @@ class ResearchEngine:
         return client.get_llm()
 
 
-__all__ = ["ResearchEngine", "DEFAULT_BAR_LIMIT"]
+__all__ = ["ResearchEngine", "DEFAULT_BAR_LIMIT", "NEWS_LOOKBACK_DAYS"]
