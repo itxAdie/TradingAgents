@@ -72,10 +72,12 @@ app = typer.Typer(
 )
 
 from cli.backtest import register_backtest_command  # noqa: E402  (needs `app` first)
+from cli.paper import register_paper_command  # noqa: E402  (needs `app` first)
 from cli.research import register_research_command  # noqa: E402  (needs `app` first)
 
 register_research_command(app)
 register_backtest_command(app)
+register_paper_command(app)
 
 
 @app.callback(invoke_without_command=True)
