@@ -7,6 +7,9 @@ After Phase 1 implementation (2026-08-23): **658 passed, 2 skipped,
 After Phase 2 implementation (2026-08-24): **739 passed, 2 skipped,
 69 subtests** (~3 min); `ruff check .` clean — 81 new backtest tests, zero
 regressions.
+After Phase 3 implementation (2026-08-24): **878 passed, 2 skipped,
+69 subtests** (~3.5 min); `ruff check .` clean — 139 new paper-trading tests,
+zero regressions.
 
 ## Principles
 
@@ -64,6 +67,27 @@ files. Key invariants each file pins down:
 | `tests/test_backtest_baselines_walkforward.py` | exact SMA cross indices on synthetic closes; momentum sign rule; B&H once-only; ATR level math; window frame arithmetic; aggregation median/best/worst/% profitable; empty-input consistency notes | 12 |
 | `tests/test_backtest_engine.py` | slice_upto boundary; output shape; **determinism** across repeated runs; **prefix isolation**: decisions identical when future bars are truncated away at multiple cut points (anti look-ahead proof); provenance timestamps; walk-forward e2e grouping; report schema/disclaimer/config-hash stability | 10 |
 | `tests/test_backtest_ai_strategy.py` | AIResearchStrategy binds sim-clock `now_fn`, disables news/sentiment(/macro), default LLM client construction, cache miss→hit→growing-history-miss, cross-instance persistence, corrupt-entry treated as miss, sha256 key form | 8 |
+
+## 1c. Phase 3 Unit Tests (paper trading)
+
+All offline (scripted SIMULATED-status provider, canned research runner,
+injected clock); 139 tests across ten files + shared helpers. Every engine
+flow runs against real JSON persistence in `tmp_path`. Key invariants:
+
+| File | Verifies | Tests |
+|---|---|---|
+| `tests/test_paper_config.py` | `"live"` environment unconstructible; kill switch defaults OFF; account-id path safety; schedule/registry/timeframe validation; stale-override keys; risk-limit inheritance | 10 |
+| `tests/test_paper_models.py` | order/signal transition tables incl. illegal jumps; fold-from-events (signal start enforced, multi-order); `PaperSignalRecord.with_transition` + rejection reason; `to_research_signal` rebuild; position↔sim bridge; EquityPoint subclass compat; journal notes | 17 |
+| `tests/test_paper_signal_id.py` | id determinism/order-insensitivity of model list; every component change ⇒ new id; case normalization; tz-aware `utc_iso`; content-sensitive bars digest; config-hash stability | 12 |
+| `tests/test_paper_scheduler.py` | next-run arithmetic; due-ness with offsets; enabled-only deterministic slot selection | 5 |
+| `tests/test_paper_validator.py` | happy BUY/SELL/HOLD; every reason code (unsupported asset/timeframe, future timestamp/market data, stale via override, invalid price/levels, missing stop, duplicate flag) | 15 |
+| `tests/test_paper_risk.py` | baseline approvals; kill-switch/halt first; daily-loss/drawdown/max-position/missing-stop/risk-budget/exposure/notional-cap vetoes; veto ordering (daily-loss beats max-positions); SELL symmetry | 15 |
+| `tests/test_paper_store.py` | create/load/refuse-overwrite; loud missing-account; schema-version and directory-mismatch guards; multi-account isolation; halt roundtrip; corrupt jsonl/state raise `PaperStateError`; append-only ordering; signal/journal/daily-fold/scheduler roundtrips | 16 |
+| `tests/test_paper_performance.py` | compute_stats delegation with N/A-with-reason; peak equity; daily/weekly/monthly UTC window P&L on crafted curves; daily-row folding (wins/losses/fees); empty-day None | 6 |
+| `tests/test_paper_safety.py` | AST scan: no broker/network module roots imported anywhere under `tradingagents/paper/`; third-party import allowlist; Environment literal stays `{test,paper}`; SIMULATED disclaimer present | 15 |
+| `tests/test_paper_engine.py` | guards (kill switch/halt/schedule/market-data failure/research failure); full lifecycle accept→next-bar-open fill→stop-out with hand-checked cost math and honest historical stop resolution; equity curve + daily rollup growth; validator/risk rejection paths persist REJECTED state; no-signal path; novelty gate skips LLM spend | 11 |
+| `tests/test_paper_recovery.py` | restart restores pending intent exactly once; no-new-bar keeps intent armed; crash-replay cannot double-execute (content dedupe before research spend, zero extra runner calls); downtime resolves stop on the real missed bar and advances scheduler across both bars; halt→resume mid-flight | 5 |
+| `tests/test_paper_cli.py` (+`paper_helpers.py`) | typer smoke over init/status/report/run/halt/resume/note with faked engine wiring: overwrite refusal, loud unknown-account status, JSON report save with schema name + disclaimer, cycle result echo, halt/resume store effects, note requires existing journal | 7 |
 
 ## 2. Integration Tests (new, still offline)
 

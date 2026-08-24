@@ -601,12 +601,202 @@ per-window isolation, no fabricated historical news/sentiment.
 
 ---
 
+# PHASE 3 — Paper Trading (IMPLEMENTED)
+
+Goal: a **real-time paper-trading environment** that reuses the Phase 1
+research engine and Phase 2 execution/portfolio/ledger/analytics stack
+unchanged, drives them with *actual current market time*, and persists every
+artifact (signals, orders, positions, trades, journal, equity curve) so the
+system survives restarts. **Still 100% simulated**: no broker connectivity,
+no order-placement code paths, no live-account credentials — the only
+executor in the system remains `backtest.execution.ExecutionSimulator`
+(pure arithmetic). Future `BrokerExecution` (Phase 5) must be a *separate*
+class behind an execution interface; nothing in `tradingagents/paper/` may
+import or reference broker SDKs (enforced by a forbidden-import test,
+`tests/test_paper_safety.py`).
+Status: implemented (`tradingagents/paper/`, `cli/paper.py`); offline-tested.
+
+## P3.0 Core principle — no duplicated signal logic
+
+The paper engine is an orchestrator, not a second brain. One cycle
+(`PaperTradingEngine.run_cycle`) follows this exact order:
+
+```
+guards (kill switch → halt flag → schedule lookup)
+→ fetch bars → drop unclosed tail (effective close = stamp + interval)
+→ novelty gate (skip unless a new bar closed since last processed)
+→ reconstruct account + ledger from store; restore ACCEPTED intents into
+  ExecutionSimulator → replay every newly closed bar through
+  on_bar_open/on_bar_close (fills at next-bar open; SL/TP resolved honestly,
+  stop wins ties — including bars missed while the process was down)
+→ persist accounting (positions, account, equity snapshot, daily rollup,
+  scheduler bookkeeping) exactly once per consumed slot-cycle
+→ content-based duplicate suppression (BEFORE any LLM spend)
+→ ResearchEngine (Phase 1, unchanged) → persist GENERATED signal record
+→ HOLD ⇒ hold_no_trade → validation gate → RiskEngine vetoes
+→ accept: signal/order → ACCEPTED, intent queued for the NEXT bar's open
+→ structured events throughout; a cycle never raises into the loop
+  (`cycle_failed` is a returned status with logged error detail)
+```
+
+As-built notes (deviations/refinements vs. the original sketch):
+- Duplicate suppression uses the content-based `signal_id` (below), not
+  `ResearchCache`: identical market state ⇒ identical id ⇒ suppressed before
+  research runs, so restarts and retries can never double-spend or
+  double-execute.
+- Fresh slots never backfill history: the first cycle on a new schedule
+  analyses only the newest closed bar and records its effective close as the
+  novelty watermark.
+- Pending intents are persisted as ACCEPTED order events and re-armed into
+  the simulator on every cycle until filled or expired; an intent whose slot
+  loses its schedule entry (or is superseded by a fresh decision) is marked
+  EXPIRED deterministically.
+- An equity snapshot is appended once per consumed slot-cycle (including
+  hold/duplicate/retry outcomes) so the curve reflects monitoring reality,
+  not just trades.
+- The AI never sizes positions and cannot remove stops: sizing comes from
+  `SizingPolicy`; a directional signal without a stop level is rejected by
+  both validator (`missing_stop_level`) and risk engine.
+
+Reused verbatim: `ResearchEngine`, `ResearchSignal` schemas, asset registry,
+`Timeframe` staleness windows, `ExecutionConfig/SizingPolicy/RiskLimits`,
+`ExecutionSimulator`, `Portfolio/Position/size_position`, `TradeLedger/
+TradeRecord`, `analytics.compute_stats` (+N/A-with-reason policy),
+`bars_content_hash` (Phase 2 dataset hashing), `log_event`. New code only
+adds: identity/idempotency, validation, risk vetoes, persistence,
+scheduling, reporting.
+
+## P3.1 Package layout (additive): `tradingagents/paper/`
+
+```
+tradingagents/paper/
+├── config.py        # PaperTradingConfig: enabled kill-switch, environment
+│                    #   Literal["test","paper"] (no "live" value exists),
+│                    #   account_id, initial_capital, per-timeframe stale
+│                    #   overrides, risk limits (extends RiskLimits fields)
+├── models.py        # PaperOrder lifecycle (SIGNAL→PENDING→ACCEPTED→EXECUTED
+│                    #   →OPEN→CLOSED; REJECTED/EXPIRED/CANCELLED/FAILED),
+│                    #   PaperSignalRecord (state GENERATED/ACCEPTED/REJECTED
+│                    #   /EXECUTED/EXPIRED/SUPERSEDED + reason), EquitySnapshot,
+│                    #   DailyPerformanceRow, JournalEntry (+human notes field)
+├── signal_id.py     # deterministic idempotent id = sha256(asset|timeframe|
+│                    #   decision_at|visible_bars_hash|PROMPT_VERSION|
+│                    #   config_hash)[:16] — mirrors ResearchCache key so the
+│                    #   same market state always yields the same signal id
+├── validator.py     # pre-execution gate: supported asset/timeframe, sane
+│                    #   timestamps, freshness vs staleness_hours, price/
+│                    #   SL/TP logical validity vs action side, duplicates;
+│                    #   invalid ⇒ rejected + logged, never executed
+├── risk.py          # RiskEngine.veto(): ordered deterministic checks — kill
+│                    #   switch/halt flag, max daily loss, max drawdown, max
+│                    #   simultaneous positions, max total exposure, max risk
+│                    #   per trade (|entry−stop|·qty ≤ pct·equity), position
+│                    #   notional cap; first failure wins, all logged
+├── store.py         # PaperStateStore Protocol + JsonPaperStateStore:
+│                    #   {data_cache_dir}/paper/{env}/{account_id}/ with
+│                    #   atomic writes (tmp+rename), pydantic-validated loads,
+│                    #   append-only orders.jsonl / trades.jsonl /
+│                    #   equity_curve.jsonl / daily.jsonl / signals index,
+│                    #   per-signal JSON, journal/, scheduler.json,
+│                    #   state.json; corrupt state raises PaperStateError
+│                    #   loudly (never silently reset)
+├── performance.py   # live stats reusing compute_stats + daily/weekly/monthly
+│                    #   P&L aggregation + N/A-with-reason policy
+├── report.py        # PAPER_ACCOUNT_REPORT schema/text render; disclaimer
+│                    #   "PAPER — SIMULATED EXECUTION"
+├── events.py        # event-name constants + NotificationProvider Protocol
+│                    #   with LoggingNotificationProvider default (no framework)
+├── scheduler.py     # pure schedule math: entries {asset,timeframe,enabled},
+│                    #   next_run from last processed bar timestamp (persisted);
+│                    #   skips cycles when no new closed bar exists
+├── engine.py        # PaperTradingEngine.run_cycle(asset, timeframe):
+│                    #   guards → fetch → closed-slice → novelty gate →
+│                    #   reconstruct + replay bars closed since last processed
+│                    #   bar through on_bar_open/on_bar_close (SL/TP resolved
+│                    #   honestly at bar level after downtime) → mark-to-market
+│                    #   → snapshots → persist → dedupe → research → validate
+│                    #   → risk → accept; read APIs: account_summary() and
+│                    #   build_report() (Phase 4 consumes these unchanged)
+└── (CLI lives at the top-level cli/paper.py, registered into cli/main.py)
+```
+
+Layer position: `paper/` may import `marketdata/`, `assets/`, `analysis/`,
+`research/`, `dataflows/`, `backtest/`; nothing lower imports `paper/`.
+
+## P3.2 Safety isolation (absolute requirement)
+
+- No broker SDK may appear in any dependency used by `tradingagents/paper/`;
+  a dedicated test fails CI if forbidden module names (`ccxt`, `alpaca`,
+  `ib_insync`, `binance`, `oanda`, `mt5`, …) are imported anywhere under
+  `tradingagents/paper/`.
+- Two switches must both pass before any cycle runs:
+  `PaperTradingConfig.enabled` **and** absence of a persisted emergency-halt
+  flag (`paper halt` / `resume` commands). Halted state is reported loudly.
+- Environment is `Literal["test","paper"]` — a `"live"` value cannot be
+  constructed. TEST mode uses fake providers labelled
+  `DataStatus.SIMULATED`; PAPER mode uses real Yahoo data labelled by
+  `classify_status`.
+- Output labels change from "NOT EXECUTED" to "PAPER — SIMULATED EXECUTION";
+  PROJECT_RULES §24 documents this label category (amendment approved
+  2026-08-24; carried by `PAPER_DISCLAIMER` and every report render).
+
+## P3.3 Live-time differences handled honestly
+
+- Decisions and fills happen on **closed-bar boundaries** of real fetched
+  data: entry fills at the open of the first bar closing *after* the signal
+  (`entry_delay_bars=1` semantics preserved); between-cycle SL/TP triggers
+  are resolved by replaying every bar closed since the last processed bar —
+  after downtime the stop is applied at the honest historical bar, never at
+  a fabricated "current" price.
+- Freshness gate reuses `Timeframe.staleness_hours()` with optional tighter
+  per-timeframe config overrides; stale ⇒ cycle aborts with
+  `SIGNAL BLOCKED — market data stale` (logged, persisted as REJECTED).
+- No synthetic fallback prices; provider errors/timeouts mark the cycle
+  failed (`FAILED` order state where applicable) and are retried next due
+  slot, never silently skipped.
+- LLM/agent failures follow Phase 1 semantics: failures recorded; if
+  insufficient research remains, **no signal is generated** (reason stored).
+
+## P3.4 Persistence & recovery
+
+Layout under `{data_cache_dir}/paper/{environment}/{account_id}/`:
+`state.json` (cash/realized/costs/counters/halt flag/schema_version),
+`positions.json`, `orders.jsonl` (append-only transitions),
+`signals/{signal_id}.json` + `signals_index.jsonl`, `trades.jsonl`,
+`journal/{trade_id}.json` (embedded exact research snapshot + notes),
+`equity_curve.jsonl`, `daily.jsonl`, `scheduler.json`. All writes atomic;
+all loads schema-validated; corruption raises instead of resetting.
+Startup recovery: load account → positions → pending orders → validate →
+reconcile against fresh bars (resolve SL/TP over missed bars, mark pending
+fills superseded if already open) → resume; every step logged
+(`paper_recovery_*` events). Multiple accounts supported by construction
+(state paths keyed by `account_id`; no singletons).
+
+## P3.5 Attribution & analytics
+
+Trade → Order → signal_id → ResearchSignal snapshot (thesis/bull/bear/
+factors/confidence/models/data sources) → dataset bar hash: full chain
+persisted at creation time, never regenerated later. Signal-vs-trade
+analytics count GENERATED/ACCEPTED/EXECUTED/REJECTED/EXPIRED/SUPERSEDED and
+evaluate what-if performance of risk-rejected signals on the subsequent
+price path (deterministic offline analyzer).
+
+## P3.6 Explicit non-goals (Phase 3)
+
+No dashboard UI (Phase 4 consumes the JSONL artifacts via clean read APIs),
+no broker execution class (Phase 5), no background daemon inside library
+code (CLI loop wrapper only), no notification providers beyond logging
+(Protocol ready for Telegram/Discord later), no new third-party
+dependencies (stdlib scheduler + JSON persistence).
+
+---
+
 ## Future Phase Boundaries (documentation only — do not implement)
 
 | Phase | Scope | Boundary hooks available |
 |---|---|---|
 | 2 Backtesting | replay signals over history | **implemented** (`tradingagents/backtest/`, P2.x above) |
-| 3 Paper Trading | simulated fills of signals | `ResearchSignal` action/levels/invalidation fields; backtest executor patterns |
+| 3 Paper Trading | simulated fills of signals | **implemented** (`tradingagents/paper/`, `cli/paper.py`, P3.x above); reuses backtest executor/portfolio verbatim |
 | 4 Dashboard | UI over stored runs | report tree + structured JSON artifacts + equity curve rows |
 | 5 Broker Integration | real execution | out of scope; nothing in core may import brokers |
 | 6 SaaS/API | hosted service | engine is a pure-Python entry point |
@@ -614,6 +804,6 @@ per-window isolation, no fabricated historical news/sentiment.
 ---
 
 *Last verified against repository state: 2026-08-24 (v0.3.1 + Phase 1 +
-Phase 2 implementation; suite 739 passed / 2 skipped / 69 subtests, ruff
-clean). Update this file
+Phase 2 + Phase 3 implementation; suite 878 passed / 2 skipped / 69 subtests,
+ruff clean). Update this file
 whenever implementation changes architecture.*

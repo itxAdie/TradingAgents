@@ -214,3 +214,70 @@ ruff: **All checks passed**.
 **Next recommended step:** real-data smoke run of the CLI backtest
 (`python cli/main.py backtest -a XAUUSD -t 1h --fetch --save`), then decide
 Phase 3 (paper trading) timing.
+
+---
+
+## Entry 4 — 2026-08-24 — Phase 3: paper trading implemented (simulation-only)
+
+**Scope delivered (approved P3 design, ARCHITECTURE.md §P3):**
+- New package `tradingagents/paper/` (12 modules): config (kill switch
+  default OFF; environment `Literal["test","paper"]` — "live" not
+  constructible), models (order/signal lifecycle state machines with
+  explicit transition tables), signal_id (content-based idempotent identity:
+  sha256 of asset|tf|decision-bar effective close|visible-bars content hash|
+  model ids|PROMPT_VERSION|config hash), validator (ordered deterministic
+  checks, stable reason codes), risk engine (ordered vetoes incl. mandatory
+  stop levels — the AI cannot size positions or drop stops), JSON store
+  (atomic writes, append-only jsonl, loud `PaperStateError` on corruption,
+  multi-account by construction), pure schedule math, performance wrapper
+  over backtest `compute_stats`, report schema with
+  "PAPER — SIMULATED EXECUTION" disclaimer, event constants +
+  NotificationProvider protocol, and the orchestrating
+  `PaperTradingEngine.run_cycle` (guards → closed-bar slice → novelty gate →
+  reconstruct + replay new bars through the unchanged Phase 2 simulator →
+  persist accounting → duplicate suppression BEFORE any LLM spend → research
+  → validate → risk → accept).
+- CLI: top-level `cli/paper.py` registered into `cli/main.py`
+  (`paper init/run/status/report/halt/resume/note`; loop mode sleeps until
+  the persisted next-due time, clamped 5–900 s).
+- Reused verbatim from earlier phases: ResearchEngine/ResearchSignal,
+  asset registry, Timeframe staleness windows, ExecutionSimulator,
+  Portfolio/sizing, TradeLedger, compute_stats, bars_content_hash, log_event.
+  No existing module changed except `cli/main.py` (+1 registration line) and
+  doc files.
+
+**Bugs caught by new tests during development (fixed in implementation code):**
+- `PaperTradingEngine.account_summary()` iterated `.values()` on a list of
+  position records → AttributeError on read APIs.
+- `cli/paper.py` imported `YahooMarketDataProvider` from a non-existent
+  module path (`dataflows.providers.yahoo_provider`) → ImportError at first
+  command invocation.
+- Two/three `append_signal_transition` call sites omitted the required
+  `reason` keyword → TypeError mid-cycle (caught as `cycle_failed`, then
+  fixed properly).
+- Restart-safety semantics verified: a restored ACCEPTED intent can only be
+  filled by bars strictly newer than the novelty watermark (finalize always
+  precedes accept within a cycle), so no decision-bar look-ahead is possible;
+  crash-replay of a consumed slot is suppressed content-wise before research.
+
+**Tests executed:** `.venv/bin/pytest -q`, `.venv/bin/ruff check .`
+
+**Test results:** pytest **878 passed, 2 skipped, 69 subtests passed**
+(~3.5 min; Phase 2 state was 739 passed — 139 new tests, zero regressions).
+ruff: **All checks passed.**
+
+**Known limitations (Phase 3 scope, by design):**
+- No dashboard UI (Phase 4 consumes `account_summary()`/JSON artifacts);
+  no broker execution class or credentials anywhere (Phase 5, out of scope;
+  forbidden-import test enforces this structurally).
+- Notifications are log-based only (Protocol ready for Telegram/Discord).
+- Scheduler is a stdlib CLI loop, not a daemon; missed wall-clock slots are
+  harmless because due-ness is bar-novelty driven.
+- Equity snapshots are appended once per consumed slot-cycle (including
+  hold/duplicate outcomes) — monitoring reality, not trade-only curve.
+- A crash in the microsecond window between the two order-transition appends
+  could leave an inert stuck-PENDING order (never executes; documented).
+
+**Next recommended step:** real-data smoke run of the paper CLI
+(`python cli/main.py paper init --enable && python cli/main.py paper run`),
+then decide Phase 4 (dashboard) timing.

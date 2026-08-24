@@ -3,7 +3,8 @@
 Documents every external data/LLM provider the project uses and the internal
 interfaces that become stable contracts. No secrets appear here — see
 `ACCESS_INFO.md` for credential setup. Status: verified against v0.3.1
-(2026-08-23); Phase 1 additions (Part C) are implemented and tested.
+(2026-08-23); Phase 1 additions (Part C), and Phase 2/3 additions (Part D)
+are implemented and tested (as of 2026-08-24).
 
 ---
 
@@ -249,6 +250,96 @@ ResearchResult(report, signal)` — orchestrates providers → indicators →
 research graph → deterministic signal assembly; emits structured log events;
 degrades per-section on failure; refuses to emit a signal without verified
 market data.
+
+---
+
+## Part D — Phase 2 + Phase 3 Interfaces (IMPLEMENTED)
+
+Backtesting and paper-trading surfaces. Both are simulation-only; neither
+touches brokers. Source of truth is the code.
+
+### D1. Backtest engine (`backtest/engine.py`) — IMPLEMENTED
+
+```python
+run_backtest(config: BacktestConfig) -> BacktestReport   # deterministic replay
+slice_upto(bars, cutoff) -> list[Bar]                    # future-bar invisibility
+```
+`BacktestReport` carries stats, equity curve (anchored), trades, provenance,
+and a fixed disclaimer. Determinism and prefix-isolation are test-pinned
+(anti look-ahead).
+
+### D2. Paper configuration (`paper/config.py`) — IMPLEMENTED
+
+```python
+Environment = Literal["test", "paper"]        # "live" is not constructible
+class PaperRiskLimits(RiskLimits):            # adds max_risk_per_trade_pct=0.01,
+    ...                                       # max_daily_loss_pct=0.03, max_drawdown_pct=0.20
+class ScheduleEntry(BaseModel):
+    asset_id: str; timeframe: str; enabled: bool = True; offset_minutes: int = 1
+class PaperTradingConfig(BaseModel):
+    environment: Environment = "test"
+    enabled: bool = False                     # kill switch — arm explicitly
+    account_id: str; initial_capital: float
+    execution/sizing/risk; stale_overrides_hours: dict[str, float]
+    enable_macro: bool; research_config: dict; schedules: list[ScheduleEntry]
+```
+
+### D3. Paper identity & lifecycle models — IMPLEMENTED
+
+```python
+compute_signal_id(*, asset_id, timeframe, decision_bar_close,
+                  visible_bars_hash, model_ids, config_hash) -> str  # 16-hex
+# models.py:
+OrderState: SIGNAL→PENDING→ACCEPTED→EXECUTED→OPEN→CLOSED | REJECTED/EXPIRED/CANCELLED/FAILED
+SignalState: GENERATED→ACCEPTED→REJECTED/EXECUTED/EXPIRED/SUPERSEDED
+fold_order_events(events) -> dict[str, PaperOrder]
+PaperSignalRecord.with_transition(new_state=..., reason=..., at=...)
+PositionRecord.to_sim_position() / .from_sim_position(...)
+EquitySnapshot(EquityPoint); DailyPerformanceRow; JournalEntry(+notes)
+```
+
+### D4. Validation & risk gates — IMPLEMENTED
+
+```python
+validate_signal_record(record, *, now, stale_overrides_hours=None,
+                       signal_exists=False) -> SignalValidation
+# reason codes: unsupported_asset/timeframe, future_timestamp/market_data,
+# stale_data, invalid_price/levels, missing_stop_level, invalid_confidence,
+# duplicate_signal
+RiskEngine(limits=..., kill_switch_enabled=..., is_halted=...).evaluate(
+    *, action, entry_price, stop_loss, quantity, mark_price, equity,
+    day_start_equity, peak_equity, open_positions, gross_exposure
+) -> RiskDecision   # ordered vetoes; first failure wins
+```
+
+### D5. Persistence (`paper/store.py`) — IMPLEMENTED
+
+```python
+JsonPaperStateStore(root, *, environment, account_id)
+# {root}/{environment}/{account_id}/: state.json, positions.json,
+# orders.jsonl, signals/{id}.json + signals_index.jsonl, trades.jsonl,
+# journal/{trade_id}.json, equity_curve.jsonl, daily.jsonl, scheduler.json
+# Atomic writes; corrupt state raises PaperStateError (never silent reset).
+```
+
+### D6. Engine & reports — IMPLEMENTED
+
+```python
+engine = PaperTradingEngine(config=..., store=..., provider=...,
+                            runner=LiveResearchRunner(...), now_fn=...)
+engine.init_account() -> AccountState          # refuses overwrite via store
+result = engine.run_cycle(asset_id, timeframe) -> CycleResult
+# status: trading_disabled | emergency_halt | schedule_missing |
+# market_data_failed | no_closed_bar | no_new_bar | duplicate_suppressed |
+# research_failed | no_signal | hold_no_trade | validation_rejected |
+# risk_rejected | accepted_pending_fill | cycle_failed
+summary = engine.account_summary() -> dict     # Phase 4 read API
+report  = engine.build_report() -> PaperAccountReport
+report.to_json(path); report.render_text(); PAPER_DISCLAIMER
+```
+
+CLI: `cli/main.py paper init|run|status|report|halt|resume|note` (see
+`--help`; all state under `{data_cache_dir}/paper/{env}/{account}/`).
 
 ---
 

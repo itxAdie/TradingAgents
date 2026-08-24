@@ -96,6 +96,8 @@ Invalid values fail loudly at startup (type-coerced against defaults).
 | Macro context (Fed/rates/inflation) for gold | + `FRED_API_KEY` |
 | Alpha Vantage as alternate vendor | + `ALPHA_VANTAGE_API_KEY`, set `data_vendors` accordingly |
 | News & sentiment | No keys (yfinance news + StockTwits + Reddit) |
+| Backtesting (Phase 2) | LLM key only when replaying AI strategies; deterministic baselines need none |
+| Paper trading (Phase 3) | Same as research; **no broker credentials exist or are read anywhere** — execution is simulated arithmetic, state is local JSON |
 
 ---
 
@@ -104,3 +106,7 @@ Invalid values fail loudly at startup (type-coerced against defaults).
 - Never commit `.env` or any real key; `.gitignore` already excludes it.
 - Use placeholders (`YOUR_API_KEY_HERE`) in examples and docs.
 - Rotate any key that ever lands in a log, screenshot, or commit history.
+- Broker/account credentials (API keys, account numbers, OAuth tokens) are
+  **not used, stored, or requested** by any phase implemented so far; Phase 5
+  (broker integration) is out of scope and nothing in the codebase imports a
+  broker SDK (enforced by `tests/test_paper_safety.py`).

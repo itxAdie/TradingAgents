@@ -87,7 +87,10 @@ section is non-negotiable.
     execution, no automatic real-money trading, no order-placement code paths
     — even if a dependency makes it technically possible.
 24. All outputs are labelled `RESEARCH SIGNAL — NOT EXECUTED`. No claims of
-    profitability, certainty, or suitability.
+    profitability, certainty, or suitability. Phase 3 paper-trading artifacts
+    carry the additional label `PAPER — SIMULATED EXECUTION` (virtual
+    account, no real money, no broker orders); simulated performance never
+    implies or guarantees any future result (see ARCHITECTURE.md P3.2).
 
 ## 7. Backward Compatibility
 
