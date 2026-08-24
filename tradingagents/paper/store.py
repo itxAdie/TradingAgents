@@ -69,9 +69,17 @@ class PaperStateStore(Protocol):
 
     def load_signal(self, signal_id: str) -> PaperSignalRecord | None: ...
     def save_signal(self, record: PaperSignalRecord) -> None: ...
+    def list_signals(self) -> list[PaperSignalRecord]: ...
     def append_signal_transition(
-        self, *, signal_id: str, from_state: str, to_state: str, reason: str
+        self,
+        *,
+        signal_id: str,
+        from_state: str,
+        to_state: str,
+        reason: str,
+        ts: datetime | None = None,
     ) -> None: ...
+    def list_signal_transitions(self) -> list[SignalTransitionRecord]: ...
 
     def append_order_event(self, event: PaperOrderEvent) -> None: ...
     def load_order_events(self) -> list[PaperOrderEvent]: ...
@@ -218,6 +226,8 @@ class JsonPaperStateStore:
     # -- positions ---------------------------------------------------------------
 
     def load_positions(self) -> list[PositionRecord]:
+        if not self._positions_path.exists():
+            return []  # no positions yet is a valid fresh-account state
         return _read_model(self._positions_path, _PositionList).root
 
     def save_positions(self, positions: list[PositionRecord]) -> None:
@@ -231,21 +241,43 @@ class JsonPaperStateStore:
             return None
         return _read_model(path, PaperSignalRecord)
 
+    def list_signals(self) -> list[PaperSignalRecord]:
+        """All persisted signal records (unsorted; callers order/filter)."""
+        signals_dir = self._base / "signals"
+        if not signals_dir.exists():
+            return []
+        records = [
+            _read_model(path, PaperSignalRecord)
+            for path in sorted(signals_dir.glob("*.json"))
+            if path.suffix == ".json"
+        ]
+        return records
+
     def save_signal(self, record: PaperSignalRecord) -> None:
         _write_model(self._signal_path(record.signal_id), record)
 
     def append_signal_transition(
-        self, *, signal_id: str, from_state: str, to_state: str, reason: str
+        self,
+        *,
+        signal_id: str,
+        from_state: str,
+        to_state: str,
+        reason: str,
+        ts: datetime | None = None,
     ) -> None:
         _append_line(
             self._signals_index_path,
-            _SignalTransition(
+            SignalTransitionRecord(
                 signal_id=signal_id,
                 from_state=from_state,
                 to_state=to_state,
                 reason=reason,
+                ts=ts or datetime.now(timezone.utc),
             ),
         )
+
+    def list_signal_transitions(self) -> list[SignalTransitionRecord]:
+        return _read_lines(self._signals_index_path, SignalTransitionRecord)
 
     # -- orders ---------------------------------------------------------------
 
@@ -331,11 +363,27 @@ class _PositionList(RootModel[list[PositionRecord]]):
     pass
 
 
-class _SignalTransition(BaseModel):
+class SignalTransitionRecord(BaseModel):
+    """One append-only signal lifecycle row (signals_index.jsonl).
+
+    ``ts`` was added for the Phase 4 dashboard; older rows parse with
+    ``ts=None`` and render as "time unknown" rather than being guessed.
+    """
+
     signal_id: str
     from_state: str
     to_state: str
     reason: str = ""
+    ts: datetime | None = None
 
 
-__all__ = ["JsonPaperStateStore", "PaperStateError", "PaperStateStore", "SCHEMA_VERSION"]
+_SignalTransition = SignalTransitionRecord  # legacy internal alias
+
+
+__all__ = [
+    "JsonPaperStateStore",
+    "PaperStateError",
+    "PaperStateStore",
+    "SCHEMA_VERSION",
+    "SignalTransitionRecord",
+]

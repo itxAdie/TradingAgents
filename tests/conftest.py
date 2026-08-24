@@ -5,6 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Shared API-server fixture (defined in api_helpers); imported here so every
+# test module gets it without shadowing imports that trip ruff F811.
+from tests.api_helpers import api as _api_fixture  # noqa: F401
+
+api = _api_fixture
+
 
 def pytest_configure(config):
     for marker in ("unit", "integration", "smoke"):

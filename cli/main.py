@@ -71,6 +71,7 @@ app = typer.Typer(
     add_completion=True,  # Enable shell completion
 )
 
+from cli.api import register_api_command  # noqa: E402  (needs `app` first)
 from cli.backtest import register_backtest_command  # noqa: E402  (needs `app` first)
 from cli.paper import register_paper_command  # noqa: E402  (needs `app` first)
 from cli.research import register_research_command  # noqa: E402  (needs `app` first)
@@ -78,6 +79,7 @@ from cli.research import register_research_command  # noqa: E402  (needs `app` f
 register_research_command(app)
 register_backtest_command(app)
 register_paper_command(app)
+register_api_command(app)
 
 
 @app.callback(invoke_without_command=True)
