@@ -22,11 +22,10 @@ sys.path.insert(0, str(REPO / "tests"))
 
 def build_synthetic_dataset(cache_dir: Path) -> None:
     """Store 520 hourly bars per asset so backtests can run end-to-end."""
+    from tests.api_helpers import T0
     from tradingagents.backtest.historical.store import JsonDataStore, build_meta
     from tradingagents.marketdata.models import Bar, DataStatus, OhlcvSeries
     from tradingagents.marketdata.timeframes import Timeframe
-
-    from tests.api_helpers import T0
 
     # the backtest worker resolves datasets under <cache>/historical
     store = JsonDataStore(cache_dir / "historical")
@@ -71,9 +70,8 @@ def main() -> None:
 
     DEFAULT_CONFIG["data_cache_dir"] = str(cache_dir)
 
-    from tradingagents.paper.store import JsonPaperStateStore
-
     from tests.api_helpers import FakeProvider, seed_account
+    from tradingagents.paper.store import JsonPaperStateStore
 
     store = JsonPaperStateStore(
         cache_dir / "paper", environment="test", account_id="paper-default"

@@ -360,11 +360,85 @@ class EventHistoryPage(Page[EventRow]):
     pass
 
 
+# -- broker / execution (Phase 5, sandbox only) ---------------------------------
+
+
+class BrokerAdapterInfo(BaseModel):
+    name: str
+    sandbox: bool = False
+
+
+class BrokerAdaptersResponse(BaseModel):
+    adapters: list[BrokerAdapterInfo]
+
+
+class BrokerReconciliationMismatchOut(BaseModel):
+    kind: str
+    detail: str
+    local_value: str | None = None
+    broker_value: str | None = None
+
+
+class BrokerReconciliationReportOut(BaseModel):
+    ts: datetime
+    trigger: str
+    orders_checked: int
+    positions_checked: int
+    clean: bool
+    mismatches: list[BrokerReconciliationMismatchOut] = Field(default_factory=list)
+    resolutions: list[str] = Field(default_factory=list)
+
+
+class BrokerStatusResponse(BaseModel):
+    environment: str
+    broker: str
+    account_id: str
+    account_verified: bool
+    connection: str
+    ready: bool
+    halted: bool
+    halt_reason: str
+    circuit_breaker: bool
+    circuit_breaker_reason: str
+    configuration_version: str
+    live_armed: bool
+    last_reconciliation: BrokerReconciliationReportOut | None = None
+
+
+class BrokerStartupResponse(BaseModel):
+    ready: bool
+    blockers: list[str]
+
+
+class BrokerShutdownResponse(BaseModel):
+    open_orders_left: int | None = None
+    final_reconciliation_clean: bool | None = None
+    final_reconciliation_error: str | None = None
+
+
+class BrokerHaltRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    operator: str = Field(min_length=1, max_length=120)
+
+
+class BrokerResumeRequest(BaseModel):
+    operator: str = Field(min_length=1, max_length=120)
+
+
 __all__ = [
     "AssetSummary",
     "AuditEventRow",
     "AuditLogResponse",
     "BacktestJobOut",
+    "BrokerAdapterInfo",
+    "BrokerAdaptersResponse",
+    "BrokerHaltRequest",
+    "BrokerReconciliationMismatchOut",
+    "BrokerReconciliationReportOut",
+    "BrokerResumeRequest",
+    "BrokerShutdownResponse",
+    "BrokerStartupResponse",
+    "BrokerStatusResponse",
     "CandleOut",
     "CandlesResponse",
     "DailyRowsResponse",

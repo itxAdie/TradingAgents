@@ -11,6 +11,7 @@ const NAV = [
   { to: "/portfolio", label: "Portfolio" },
   { to: "/trades", label: "Trades" },
   { to: "/risk", label: "Risk" },
+  { to: "/broker", label: "Broker" },
   { to: "/backtests", label: "Backtests" },
   { to: "/system", label: "System" },
 ];

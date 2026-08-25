@@ -42,6 +42,8 @@ class AppContext:
         self._quote_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._paper_configs: dict[tuple[str, str], PaperTradingConfig] = {}
+        self._broker_engine = None  # lazy singleton; startup state must persist
+        self._broker_lock = threading.Lock()
 
     # -- configuration ------------------------------------------------------------
 
@@ -112,6 +114,42 @@ class AppContext:
                 now_fn=lambda: datetime.now(timezone.utc),
             )
         return self._runner
+
+    def broker_engine(self):
+        """Process-wide LiveExecutionEngine (sandbox adapter for now).
+
+        A singleton on purpose: ``started/ready`` and the consecutive-loss /
+        day-anchor state live in memory, so per-request construction would
+        silently reset the safety posture while the store looked fine.
+        """
+        if self._broker_engine is not None:
+            return self._broker_engine
+        with self._broker_lock:
+            if self._broker_engine is not None:
+                return self._broker_engine
+            from tradingagents.brokers.registry import build_broker
+            from tradingagents.execution.config import load_live_execution_config
+            from tradingagents.execution.engine import LiveExecutionEngine
+
+            config = load_live_execution_config(
+                broker_name=self.settings.broker_name,
+                cache_dir=self.cache_dir,
+                account_id=None,  # env-provided / default sandbox account
+            )
+            adapter = build_broker(
+                config.broker_name,
+                account_id=config.account_id,
+                base_currency=config.base_currency,
+            )
+            self._broker_engine = LiveExecutionEngine(
+                config=config,
+                adapter=adapter,
+                provider=self.provider(),
+                notifier=self.bus,
+                bus=self.bus,
+                audit=self.audit.record,
+            )
+            return self._broker_engine
 
     # -- background workers ---------------------------------------------------------
 

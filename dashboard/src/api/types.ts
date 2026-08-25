@@ -458,3 +458,54 @@ export interface BusEvent {
   ts: string;
   payload: Record<string, unknown>;
 }
+
+// -- broker / execution (sandbox only) -------------------------------------------------
+
+export interface BrokerAdapterInfo {
+  name: string;
+  sandbox: boolean;
+}
+
+export interface BrokerReconciliationMismatch {
+  kind: string;
+  detail: string;
+  local_value: string | null;
+  broker_value: string | null;
+}
+
+export interface BrokerReconciliationReport {
+  ts: string;
+  trigger: string;
+  orders_checked: number;
+  positions_checked: number;
+  clean: boolean;
+  mismatches: BrokerReconciliationMismatch[];
+  resolutions: string[];
+}
+
+export interface BrokerStatus {
+  environment: string;
+  broker: string;
+  account_id: string;
+  account_verified: boolean;
+  connection: string;
+  ready: boolean;
+  halted: boolean;
+  halt_reason: string;
+  circuit_breaker: boolean;
+  circuit_breaker_reason: string;
+  configuration_version: string;
+  live_armed: boolean;
+  last_reconciliation: BrokerReconciliationReport | null;
+}
+
+export interface BrokerStartupResult {
+  ready: boolean;
+  blockers: string[];
+}
+
+export interface BrokerShutdownSummary {
+  open_orders_left: number | null;
+  final_reconciliation_clean: boolean | null;
+  final_reconciliation_error: string | null;
+}

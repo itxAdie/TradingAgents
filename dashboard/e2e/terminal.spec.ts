@@ -85,3 +85,34 @@ test.describe("backtests", () => {
     await expect(page.getByText(/Walk-forward \(\d+ strategies\)/)).toBeVisible();
   });
 });
+
+test.describe("broker (sandbox)", () => {
+  test("paper badge loop includes the broker page", async ({ page }) => {
+    await page.goto("/broker");
+    const badge = page.getByTestId("paper-badge");
+    await expect(badge).toBeVisible();
+  });
+
+  test("status renders sandbox environment and reconciliation panel", async ({ page }) => {
+    await page.goto("/broker");
+    await expect(page.getByText("Execution environment")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("sandbox", { exact: true }).first()).toBeVisible();
+    // honest empty state before any startup has run in this store
+    await expect(
+      page.getByText(/No reconciliation has run yet|trigger/i),
+    ).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("startup then halt then resume round-trip with audited state", async ({ page }) => {
+    await page.goto("/broker");
+    await page.getByRole("button", { name: "startup" }).click();
+    await expect(page.getByText("startup OK").or(page.getByText("ready")).first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByPlaceholder("halt reason").fill("e2e drill");
+    await page.getByRole("button", { name: "HALT" }).click();
+    await expect(page.getByText("halted", { exact: true })).toBeVisible({ timeout: 10_000 });
+    await page.getByRole("button", { name: "resume" }).click();
+    await expect(page.getByText("resumed OK")).toBeVisible({ timeout: 10_000 });
+  });
+});

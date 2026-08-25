@@ -62,7 +62,10 @@ def register_api_command(app: typer.Typer) -> None:
             f"(research loop: {'ARMED' if enable_loop else 'off'})",
             fg=typer.colors.YELLOW if enable_loop else typer.colors.GREEN,
         )
-        typer.echo("PAPER TRADING - SIMULATED EXECUTION ONLY. No broker connectivity exists.")
+        typer.echo(
+            "PAPER TRADING - SIMULATED EXECUTION ONLY. Broker integration is "
+            "sandbox-adapter only (no real venue connectivity)."
+        )
         uvicorn.run(create_app(settings), host=host, port=port, log_level="info")
 
     # Registration convention: flat command alongside research/backtest/paper.

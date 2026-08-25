@@ -9,6 +9,7 @@ import { SignalDetailPage } from "./pages/SignalDetailPage";
 import { PortfolioPage } from "./pages/PortfolioPage";
 import { TradesPage } from "./pages/TradesPage";
 import { RiskPage } from "./pages/RiskPage";
+import { BrokerPage } from "./pages/BrokerPage";
 import { BacktestsPage } from "./pages/BacktestsPage";
 import { SystemPage } from "./pages/SystemPage";
 
@@ -36,6 +37,7 @@ export function App() {
             <Route path="portfolio" element={<PortfolioPage />} />
             <Route path="trades" element={<TradesPage />} />
             <Route path="risk" element={<RiskPage />} />
+            <Route path="broker" element={<BrokerPage />} />
             <Route path="backtests" element={<BacktestsPage />} />
             <Route path="system" element={<SystemPage />} />
           </Route>

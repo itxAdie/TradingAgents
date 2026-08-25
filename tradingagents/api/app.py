@@ -36,6 +36,7 @@ class ServerSettings(BaseModel):
 
     environment: str = "test"
     account_id: str = "paper-default"
+    broker_name: str = "sandbox"  # only registered adapter in Phase 5
     assets: list[str] = Field(default_factory=lambda: ["XAUUSD", "BTCUSD"])
     timeframes: list[str] = Field(default_factory=lambda: ["15m", "1h", "4h", "1d"])
     enable_research_loop: bool = False  # kill switch — arming is audited
@@ -119,6 +120,7 @@ def create_app(settings: ServerSettings) -> FastAPI:
 
     from tradingagents.api.routes import (
         backtests,
+        broker,
         events,
         markets,
         portfolio,
@@ -139,6 +141,7 @@ def create_app(settings: ServerSettings) -> FastAPI:
     app.include_router(backtests.router, prefix=api_prefix)
     app.include_router(system.router, prefix=api_prefix)
     app.include_router(events.router, prefix=api_prefix)
+    app.include_router(broker.router, prefix=api_prefix)
 
     # -- SPA static hosting -------------------------------------------------------
 

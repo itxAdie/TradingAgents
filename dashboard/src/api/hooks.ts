@@ -4,6 +4,11 @@ import type {
   AuditEventRow,
   BacktestJob,
   BacktestReport,
+  BrokerAdapterInfo,
+  BrokerReconciliationReport,
+  BrokerShutdownSummary,
+  BrokerStartupResult,
+  BrokerStatus,
   BusEvent,
   CandlesResponse,
   EquityPoint,
@@ -194,4 +199,39 @@ export function useEventBuffer(max = 200): {
   }, [max]);
 
   return { events, state };
+}
+
+// -- broker / execution (sandbox only) ---------------------------------------------------
+
+export async function fetchBrokerStatus(): Promise<BrokerStatus> {
+  return get<BrokerStatus>("/broker");
+}
+
+export async function fetchBrokerAdapters(): Promise<BrokerAdapterInfo[]> {
+  const data = await get<{ adapters: BrokerAdapterInfo[] }>("/broker/adapters");
+  return data.adapters;
+}
+
+export async function fetchBrokerReconciliation(): Promise<BrokerReconciliationReport | null> {
+  return get<BrokerReconciliationReport | null>("/broker/reconciliation");
+}
+
+export async function brokerStartup(): Promise<BrokerStartupResult> {
+  return send<BrokerStartupResult>("POST", "/broker/startup");
+}
+
+export async function brokerShutdown(): Promise<BrokerShutdownSummary> {
+  return send<BrokerShutdownSummary>("POST", "/broker/shutdown");
+}
+
+export async function brokerReconcile(): Promise<BrokerReconciliationReport> {
+  return send<BrokerReconciliationReport>("POST", "/broker/reconcile");
+}
+
+export async function brokerHalt(reason: string, operator: string): Promise<BrokerStatus> {
+  return send<BrokerStatus>("POST", "/broker/halt", { reason, operator });
+}
+
+export async function brokerResume(operator: string): Promise<BrokerStatus> {
+  return send<BrokerStatus>("POST", "/broker/resume", { operator });
 }
